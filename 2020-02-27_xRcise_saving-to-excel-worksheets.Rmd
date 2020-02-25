@@ -1,0 +1,228 @@
+---
+title: "Saving data to Excel worksheets"
+author: "Derek"
+date: "2/15/2020"
+output: html_document
+---
+
+```{r setup, message = FALSE}
+library(dplyr)
+library(magrittr)
+library(tidyr)
+
+
+options(stringsAsFactors = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem setup
+
+A coworker wants to see some summaries of a large dataset: numbers of observations from treatments that match cutoffs. I want to go one better and give her the summaries, but also the subsets of the data that correspond to the observations that made it past the cutoffs. 
+
+She works in Excel for data exploration, so I'm going to package up the summary and the subsets into a single Excel workbook, with the summary and data subsets existing on a different sheet. 
+
+*Note: I need to spend some time teaching her how to use Excel more effectively by shaping the data in forms that makes it easy to manipulate and summarize.*
+
+## Data generation
+
+I work for Dupont and the data is private. So let's generate some data. 
+
+Small batch, handcrafted.
+
+![](assets/woodworking-plane.jpg)
+
+Aspects of the data:
+
+- 3 treatments
+- 3 timepoints per trt
+- log2fc
+- adjusted p value
+
+
+Let's pretend:
+
+- treatment A is same across all timepoints, and has significant differences
+- treatment B is the same across all timepoints, but doesn't really have significant differences
+- treatment C has an increased log2fc, and more siginificant diffs across time. 
+
+All compared to a standard control treatment, so we'll just leave that out of the table. 
+
+And let's make some functions to generate these data:
+
+```{r, eval = FALSE}
+GenerateTreatmentA <- function(n_per_tp = 100){
+  ...
+}
+```
+
+Wait, let's abstract this even more to make a function that generates data at the timepoint level ... I can then apply over a table to generate the data
+
+```{r}
+GenerateTimepoint <- function(n, trt, timep, lfc_sd, pterm){
+  pvals <- runif(n, min = 0, max = (1 - pterm))
+  lfcs <- rnorm(n, mean = 0, sd = lfc_sd)
+  
+  return(tibble(gene_id = paste0("gene", 1:n),
+                trt = trt,
+                timep = timep,
+                log2fc = lfcs,
+                padj = pvals))
+}
+```
+
+Ok, make the table to describe the trts, timepoints:
+```{r}
+exp_design <- bind_rows(
+tibble(trt = "A",
+           timep = 1:3,
+           lfc_sd = 3,
+           pterm = .5),
+tibble(trt = "B",
+           timep = 1:3,
+           lfc_sd = 3,
+           pterm = 0),
+tibble(trt = "C",
+           timep = 1:3,
+           lfc_sd = 3:5,
+           pterm = c(.5, .7, .9))
+)
+exp_design
+```
+
+And let's make the data:
+
+```{r, eval = FALSE}
+# this breaks
+diffexpr <- apply(exp_design, 1, function(x){
+  GenerateTimepoint(n = 300,
+                    trt = x["trt"],
+                    timep = x["timep"],
+                    lfc_sd = x["lfc_sd"],
+                    pterm = x["pterm"])
+})
+```
+
+```{r}
+# this is why we can't have nice things
+apply(exp_design, 1, function(x){
+  str(x)
+})
+```
+
+Spending way too much time on the data creation .... so... I'll just use a `for` loop D:
+
+```{r}
+# reproducibly random
+set.seed(333)
+
+catch <- list()
+for(i in seq_along(exp_design$trt)){
+  catch[[i]] <- GenerateTimepoint(n = 2000,
+                                  trt = exp_design$trt[i],
+                                  timep = exp_design$timep[i],
+                                  lfc_sd = exp_design$lfc_sd[i],
+                                  pterm = exp_design$pterm[i])
+}
+diff_expr <- bind_rows(catch)
+```
+
+
+![](assets/whatever.gif)
+
+## Working with the data
+
+
+So here is a summary of the total number of differentially expressed genes:
+
+```{r}
+diff_expr %>% filter(abs(log2fc) >= 1.5,
+                         padj < 0.05) %>% 
+  group_by(trt, timep) %>% 
+  summarize(DEGs = n())
+```
+
+
+My coworker was interested in seeing the summaries of the differentially expressed genes depending on different l2fc cutoffs. In retrospect I should have sat down with her to figure out the best cutoff for the data (either based on histograms or levels that one cares about) ...
+
+I also was thinking that I can do one better: not only give the summaries, but also give the subsets of the genes, so she could explore the genes. 
+
+Enter `writexl`
+
+```{r, eval = FALSE}
+install.packages("writexl")
+```
+
+I'll want to make the following:
+
+- first sheet with a summary
+- each sheet corresponding to a comparison / timepoint.
+
+> To write multiple sheets, use a list of named data frames
+
+Nice.
+
+```{r}
+WriteSummaryXLSX <- function(dexp, log2fc_cut, adj_pval_cut, xlsxname){
+  # dexp is the differential expression table
+  
+  deg_summary <- dexp %>% filter(abs(log2fc) >= log2fc_cut,
+                         padj < adj_pval_cut) %>% 
+    group_by(trt, timep) %>% 
+  summarize(DEGs = n())
+  
+  compar.ls <- dexp %>% filter(abs(log2fc) >= log2fc_cut,
+                         padj < adj_pval_cut) %>%
+    mutate(comparison = paste0(trt, "_", timep)) %>%
+    arrange(comparison) %>%
+    split(., f = .$comparison)
+  
+  c(list(summary = deg_summary), compar.ls) %>% 
+    writexl::write_xlsx(., xlsxname)
+  
+}
+```
+
+```{r}
+WriteSummaryXLSX(diff_expr,
+                 log2fc_cut = 1.5,
+                 adj_pval_cut = 0.05,
+                 "~/tmp/test.xlsx")
+```
+
+
+
+
+And this is what I actually used:
+
+```{r, eval = FALSE}
+WriteSummaryXLSX <- function(dexp, log2fc_cut, adj_pval_cut, xlsxname){
+  # dexp is the differential expression table
+  
+  deg_summary <- dexp %>% filter(abs(log2fc) >= log2fc_cut,
+                         adj_pval < adj_pval_cut,
+                         de_denom == "control") %>% 
+    group_by(comparison) %>% 
+  summarize(DEGs = n())
+  
+  compar.ls <- dexp %>% filter(abs(log2fc) >= log2fc_cut,
+                         adj_pval < adj_pval_cut,
+                         de_denom == "control") %>% 
+    left_join(., 
+              gene_metadata %>%
+                select(gene_id, func_anno_atcc, func_anno_bi26)
+              ) %>% 
+    select(gene_id:adj_pval, func_anno_atcc:func_anno_bi26) %>% 
+    arrange(comparison) %>% 
+    split(., f = .$comparison)
+  
+  c(list(summary = deg_summary), compar.ls) %>% 
+    writexl::write_xlsx(., xlsxname)
+  
+}
+```
+
+
+
+## A moment of pause
+
+Did I really need to separate the DEGs into sheets? No -- I think she would have preferred to work with all of them in the same sheet. But at least I can work with saving to Excel sheets, so that's neat. 
